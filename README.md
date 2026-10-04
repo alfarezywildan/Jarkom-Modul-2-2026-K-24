@@ -902,3 +902,420 @@ curl http://core.k24.com/profil
 hasilnya:
 
 ![alt text](assets/nomer10.jpeg)
+
+11. Konfigurasikan Penny (menggunakan Apache) sebagai reverse proxy yang mengarah ke semua node di area vault (Obladi & Desmond). Sementara itu, konfigurasikan Abbey (menggunakan Nginx) sebagai reverse proxy menuju area core (Oblada & Molly). Pastikan kedua gerbang ini meneruskan identitas asli pengunjung ke server backend dengan melakukan forwarding header Host dan X-Real-IP. Buktikan bahwa Penny dan Abbey berhasil mendistribusikan lalu lintas dengan tepat.
+
+Pertama kami membuat script konfigurasi untuk Penny menggunakan Apache.
+```sh
+#!/bin/bash
+# Script Konfigurasi Penny sebagai Reverse Proxy Area Vault
+
+# 1. Update repository dan pastikan apache2 terinstall
+apt-get update
+apt-get install -y apache2
+
+# 2. Aktifkan modul apache yang dibutuhkan untuk reverse proxy & load balancer
+a2enmod proxy proxy_http proxy_balancer lbmethod_byrequests headers
+
+# 3. Buat file konfigurasi virtual host Apache
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName penny.k24.com 
+
+    <Proxy balancer://vault_cluster>
+        BalancerMember http://obladi.k24.com
+        BalancerMember http://desmond.k24.com
+        ProxySet lbmethod=byrequests
+    </Proxy>
+
+    # Forwarding header identitas asli
+    ProxyPreserveHost On
+    RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+
+    ProxyPass / balancer://vault_cluster/
+    ProxyPassReverse / balancer://vault_cluster/
+</VirtualHost>
+EOF
+
+# 4. Restart service Apache2 agar konfigurasi diterapkan
+service apache2 restart
+echo "Konfigurasi Penny Selesai!"
+```
+Kemudian kami juga membuat script konfigurasi untuk Abbey menggunakan Nginx.
+```sh
+#!/bin/bash
+# Script Konfigurasi Abbey sebagai Reverse Proxy Area Core
+
+# 1. Update repository dan pastikan nginx terinstall
+apt-get update
+apt-get install -y nginx
+
+# 2. Timpa konfigurasi default Nginx dengan blok reverse proxy
+cat << 'EOF' > /etc/nginx/sites-available/default
+upstream core_cluster {
+    server oblada.k24.com;
+    server molly.k24.com;
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
+    server_name abbey.k24.com;
+
+    location / {
+        proxy_pass http://core_cluster;
+        
+        # Forwarding header identitas asli
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+# 3. Restart service Nginx agar konfigurasi diterapkan
+service nginx restart
+echo "Konfigurasi Abbey Selesai!"
+```
+Setelah semuanya terkonfigurasi, jalankan scriptnya pada terminal node Penny dan Abbey. Kemudian lakukan command `curl http://penny.k24.com` untuk domain milik penny dan `curl http://abbey.k24.com` untuk domain milik abbey. Dibawah ini adalah hasilnya.
+
+![alt text](assets/nomer11_penny.png)
+![alt text](assets/nomer11_abbey.png)
+bisa dilihat pada gambar diatas untuk output dari penny adalah html dan output abbey adalah Hello Core.
+
+12. Terdapat ruang khusus di penny yang yang menyimpan dokumen rahasia sindikat, oleh karena itu terapkan perlindungan basic authentication untuk path /admin. Akses ke jalur tersebut harus menolak pengunjung tanpa kredensial, dan hanya mengizinkan masuk jika menggunakan credential berikut:
+
+|username          |password |
+|------------------|---------|
+|prabs   |pakar_pinter_jadi_gob***|
+
+Pertama buat konfigurasi script di node penny agar hanya admin yang memiliki akses untuk membuka dokumen rahasia sindikat.
+```sh
+#!/bin/bash
+
+# 1. Install apache2-utils untuk menggunakan perintah htpasswd
+apt-get update
+apt-get install -y apache2-utils
+
+# 2. Buat direktori lokal untuk /admin dan isi dengan dokumen rahasia
+mkdir -p /var/www/html/admin
+echo "<h1>Dokumen Rahasia Sindikat</h1>" > /var/www/html/admin/index.html
+
+# 3. Buat file kredensial .htpasswd (opsi -b untuk memasukkan password langsung di command, -c untuk create)
+htpasswd -bc /etc/apache2/.htpasswd prabs "pakar_pinter_jadi_gob***"
+
+# 4. Tulis ulang konfigurasi VirtualHost dengan penambahan autentikasi
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+<VirtualHost *:80>
+    ServerName penny.k24.com 
+
+    # --- KONFIGURASI SOAL 12 ---
+    # Kecualikan path /admin agar tidak dikirim ke node area vault
+    ProxyPass /admin !
+
+    # Terapkan perlindungan Basic Authentication pada path /admin
+    <Location /admin>
+        AuthType Basic
+        AuthName "Restricted Area"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+    </Location>
+    # ---------------------------
+
+    # --- KONFIGURASI SOAL 11 ---
+    <Proxy balancer://vault_cluster>
+        BalancerMember http://obladi.k24.com
+        BalancerMember http://desmond.k24.com
+        ProxySet lbmethod=byrequests
+    </Proxy>
+
+    ProxyPreserveHost On
+    RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+
+    ProxyPass / balancer://vault_cluster/
+    ProxyPassReverse / balancer://vault_cluster/
+    # ---------------------------
+</VirtualHost>
+EOF
+
+# 5. Restart service Apache2 agar konfigurasi diterapkan
+service apache2 restart
+echo "Konfigurasi Basic Auth untuk /admin selesai!"
+```
+Kemudian tinggal jalankan script diatas. Dengan menggunakan command `curl -u prabs:pakar_pinter_jadi_gob*** http://penny.k24.com/admin/` untuk mengetahui isi dari dokumen rahasia memakai akses admin. Lalu dibawah ini adalah hasil dari script diatas.
+
+![alt text](assets/prabs_nomer12.png)
+bisa dilihat kalau tidak menggunakan username prabs dan passwordnya maka tidak bisa mengakses isi dari dokumen rahasia sindikat.
+
+13. Setiap entitas dari luar harus memanggil gerbang dengan nama kanoniknya. Jika ada yang mencoba mengakses IP penny dan domain  penny.xxx.com, paksa sistem untuk melakukan redirect secara permanen (status code 301) menuju www.xxx.com. Sebaliknya, jika ada yang mengakses IP abbey dan domain abbey.xxx.com, lakukan redirect sementara (status code 302) menuju static.xxx.com.
+
+Pertama kami membuat script konfigurasi untuk masing-masing node penny dan abbey.
+
+Konfigurasi penny:
+```sh
+#!/bin/bash
+
+# Aktifkan modul alias (jika belum) untuk fungsionalitas redirect
+a2enmod alias
+
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+# VHost 1: Menangkap akses IP dan penny.k24.com, lalu Redirect 301
+<VirtualHost *:80>
+    ServerName penny.k24.com
+    # Karena ini VHost pertama, akses menggunakan IP juga akan masuk ke sini
+    Redirect permanent / http://www.k24.com/
+</VirtualHost>
+
+# VHost 2: Layanan Utama menggunakan nama kanonik www.k24.com
+<VirtualHost *:80>
+    ServerName www.k24.com
+
+    # --- Konfigurasi Soal 12 (Path /admin) ---
+    ProxyPass /admin !
+    <Location /admin>
+        AuthType Basic
+        AuthName "Restricted Area"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+    </Location>
+
+    # --- Konfigurasi Soal 11 (Reverse Proxy Vault) ---
+    <Proxy balancer://vault_cluster>
+        BalancerMember http://obladi.k24.com
+        BalancerMember http://desmond.k24.com
+        ProxySet lbmethod=byrequests
+    </Proxy>
+
+    ProxyPreserveHost On
+    RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+
+    ProxyPass / balancer://vault_cluster/
+    ProxyPassReverse / balancer://vault_cluster/
+</VirtualHost>
+EOF
+
+service apache2 restart
+echo "Konfigurasi Redirect 301 Penny selesai!"
+```
+Kemudian konfigurasi untuk abbey:
+```sh
+#!/bin/bash
+
+cat << 'EOF' > /etc/nginx/sites-available/default
+upstream core_cluster {
+    server oblada.k24.com;
+    server molly.k24.com;
+}
+
+# Blok 1: Menangkap akses IP Abbey (default_server) dan abbey.k24.com
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name abbey.k24.com _; 
+    
+    # Melakukan redirect sementara (302)
+    return 302 http://static.k24.com$request_uri;
+}
+
+# Blok 2: Layanan Utama menggunakan nama kanonik static.k24.com
+server {
+    listen 80;
+    server_name static.k24.com;
+
+    location / {
+        proxy_pass http://core_cluster;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+service nginx restart
+echo "Konfigurasi Redirect 302 Abbey selesai!"
+```
+
+Selanjutnya tinggal dijalankan saja kedua script diatas. Ketika node lain mencoba mengakses domain penny dengan domain lama, maka akan muncul  output kalau domain dari IP penny telah dipindah. Hal ini juga berlaku untuk abbey, bedanya kalau penny dipindah permanen, sedangkan abbey dipindah sementara. Dapat dilihat pada gambar dibawah:
+
+![alt](assets/gagal_akses_domain_nomer13.png)
+
+pada gambar diatas adalah hasil ketika kita mencoba mengakses domain yang lama.
+
+![alt](assets/sukses_akses_domain_nomer13.png)
+
+pada gambar diatas adalah hasil ketika kita mencoba mengakses domain yang baru.
+
+14. Di dalam The Mesh, rekam jejak tidak boleh dipalsukan oleh sistem. Pastikan access log pada setiap server web di area vault maupun area core mencatat alamat IP asli milik client (pengunjung) yang diteruskan oleh gerbang, dan bukan mencatat IP dari Penny ataupun Abbey.
+
+15. Rootkit menginstruksikan pembuatan jalur proxy khusus yang berdiri sendiri. Pada penny buat reverse proxy untuk path /eternal yang menyajikan directory /var/www/eternal, dan pastikan path ini dapat mengeksekusi (rendering) file php. Pada abbey, buat jalur /orion yang menyajikan directory /var/www/orion, secara murni statis tanpa perlu rendering php.
+
+Pertama kami membuat script konfigurasi untuk masing-masing node penny dan abbey.
+
+Node penny:
+```sh
+#!/bin/bash
+
+# 1. Install PHP-FPM untuk rendering file PHP
+apt-get update
+apt-get install -y php-fpm
+
+# 2. Aktifkan modul proxy FastCGI dan alias di Apache
+a2enmod proxy_fcgi alias
+
+# 3. Buat direktori dan file percobaan PHP
+mkdir -p /var/www/eternal
+echo "<?php echo '<h1>Jalur Eternal (PHP) Berjalan!</h1>'; ?>" > /var/www/eternal/index.php
+
+# 4. Atur PHP-FPM agar mendengarkan di port TCP 9000 (menghindari error versi sock file)
+sed -i 's|listen = /run/php/.*.sock|listen = 127.0.0.1:9000|g' /etc/php/*/fpm/pool.d/www.conf
+service php*-fpm restart || /etc/init.d/php*-fpm restart
+
+# 5. Tulis ulang konfigurasi VirtualHost
+cat << 'EOF' > /etc/apache2/sites-available/000-default.conf
+# Blok Redirect (Soal 13)
+<VirtualHost *:80>
+    ServerName penny.k24.com
+    Redirect permanent / http://www.k24.com/
+</VirtualHost>
+
+# Blok Utama
+<VirtualHost *:80>
+    ServerName www.k24.com
+
+    # --- KONFIGURASI SOAL 15 (Jalur Proxy Eternal PHP) ---
+    # Tanda seru (!) berarti "jangan teruskan path ini ke load balancer"
+    ProxyPass /eternal !
+    Alias /eternal /var/www/eternal
+    
+    <Directory /var/www/eternal>
+        Require all granted
+        # Render file PHP dengan meneruskannya ke layanan lokal PHP-FPM
+        <FilesMatch "\.php$">
+            SetHandler "proxy:fcgi://127.0.0.1:9000"
+        </FilesMatch>
+    </Directory>
+    
+    # --- KONFIGURASI SOAL 12 (Jalur Admin) ---
+    ProxyPass /admin !
+    <Location /admin>
+        AuthType Basic
+        AuthName "Restricted Area"
+        AuthUserFile /etc/apache2/.htpasswd
+        Require valid-user
+    </Location>
+
+    # --- KONFIGURASI SOAL 11 (Load Balancer Vault) ---
+    <Proxy balancer://vault_cluster>
+        BalancerMember http://obladi.k24.com
+        BalancerMember http://desmond.k24.com
+        ProxySet lbmethod=byrequests
+    </Proxy>
+
+    ProxyPreserveHost On
+    RequestHeader set X-Real-IP "%{REMOTE_ADDR}s"
+
+    ProxyPass / balancer://vault_cluster/
+    ProxyPassReverse / balancer://vault_cluster/
+</VirtualHost>
+EOF
+
+service apache2 restart
+echo "Konfigurasi /eternal di Penny selesai!"
+```
+Node abbey:
+```sh
+#!/bin/bash
+
+# 1. Buat direktori statis dan file HTML murni
+mkdir -p /var/www/orion
+echo "<h1>Jalur Orion (Statis murni) Berjalan!</h1>" > /var/www/orion/index.html
+
+# 2. Tulis ulang konfigurasi Nginx
+cat << 'EOF' > /etc/nginx/sites-available/default
+upstream core_cluster {
+    server oblada.k24.com;
+    server molly.k24.com;
+}
+
+# Blok Redirect (Soal 13)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name abbey.k24.com _; 
+    return 302 http://static.k24.com$request_uri;
+}
+
+# Blok Utama
+server {
+    listen 80;
+    server_name static.k24.com;
+
+    # --- KONFIGURASI SOAL 15 (Jalur Statis Orion) ---
+    location /orion/ {
+        alias /var/www/orion/;
+        index index.html;
+    }
+
+    # --- KONFIGURASI SOAL 11 (Load Balancer Core) ---
+    location / {
+        proxy_pass http://core_cluster;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+service nginx restart
+echo "Konfigurasi /orion di Abbey selesai!"
+```
+
+Kemudian cara akses ke path eternal menggunakan `curl http://www.k24.com/eternal/` dan orion menggunakan `curl http://static.k24.com/orion/`. Untuk hasilnya sebagai berikut:
+
+![alt](assets/nomer15.png)
+Bisa dilihat pada gambar kalau akses menuju ke path eternal maupun orion berhasil.
+
+16. Ketahanan gerbang The Mesh harus diuji untuk menghadapi bombardir permintaan. Salah satu Klien (misal: Alpha) bertugas melakukan stress test benchmark menggunakan ApacheBench. Lakukan 250 requests dengan tingkat konkurensi (concurrencies) 10 untuk masing - masing titik akhir: www.xxx.com dan static.xxx.com. Tampilkan rangkuman hasilnya.
+
+Pada node klien lakukan command `apt-get update` dan 
+`apt-get install -y apache2-utils` untuk melakukan instalasi ApacheBench. Setelah instalasi lakukan command `ab -n 250 -c 10 http://www.k24.com/` dan `ab -n 250 -c 10 http://static.k24.com/` untuk mengetahui berapa complete requestnya, berapa failed requestnya, request per secondnya, dan time taken for test. Berikut adalah hasilnya:
+
+![alt](assets/www.k24.com_nomer16.png)
+![alt](assets/static.k24.com_nomer16.png)
+
+17. Tambahkan TXT record pada DNS untuk semua klien sayap kiri dan sayap kanan (Alpha, Beta, Gamma, Delta, Epsilon). Jika DNS di-query TXT terhadap nama domain mereka (contoh: alpha.<xxxx>.com), sistem harus mengembalikan teks berupa nama hostname mereka masing-masing (contoh: "alpha").
+
+Ini adalah hasilnya:
+
+![alt](assets/hasil_nomer17.png)
+
+18. Ubah A record DNS milik abbey.xxx.com ke alamat IP yang fiktif (ubah secara random namun pastikan format IP valid). Naikkan nilai serial SOA di prab dan pastikan tedd ikut tersinkron. Tetapkan TTL sebesar 15 detik pada record yang relevan tersebut. Verifikasi momen yang terjadi pada tiga fase pencarian: sebelum perubahan terjadi (mengembalikan IP lama), saat perubahan baru saja terjadi dalam jeda 15 detik (masih IP lama karena cache), dan setelah batas waktu TTL habis (berubah ke IP fiktif yang baru).
+
+Pertama lakukan penggantian pada folder `/etc/bind/db.k24`. 
+
+![alt](assets/IP_Baru_nomer18.png)
+
+Kemudian pada baris abbey, lakukan penggantian IP dengan IP baru dan berikan jeda selama 15 detik.
+
+Ini adalah IP sebelum diganti:
+
+![alt](assets/sebelum_nomer18.png)
+
+Ini adalah IP sesudah diganti:
+
+![alt](assets/sesudah_nomer18.png)
+
+pada gambar sesudah diganti, kami mencoba melakukan pengulangan restart karena ketika kami lakukan restart untuk percobaan cache selama 15 detik, tidak ada jeda sama sekali sesaat setelah IP diperbarui sehingga ketika dilakukan uji coba hasilnya langsung menunjukkan IP baru dan tidak ada delay selama 15 detik setelah dilakukan restart. Kami mengasumsikan kalau melakukan jeda setelah IP diperbarui itu memang tidak bisa.
+
+19. Last? But not least? Buat CNAME record yang melakukan binding dari domain internal outbound.xxx.com menuju domain eksternal http.badssl.com, Lakukan perintah curl ke http://outbound.xxx.com dan pastikan output yang dihasilkan sesuai dengan isi konten di halaman http.badssl.com.
+
+Ini adalah hasilnya:
+
+![alt](assets/hasil_nomer19.png)
+
+20. Setelah semua penyelesaian selesai, pastikan semua service dan konfigurasi yang telah dikerjakan dari awal tetap berjalan normal dan berstatus autostart saat node di-restart (khusus untuk kasus ini, abaikan konfigurasi nomor 18 dan biarkan koordinat kembali normal).
+
+Untuk nomor 20 kita cukup restart saja nodenya.
