@@ -773,7 +773,7 @@ hasilnya:
 
 9. Kami menetapkan konfigurasi layanan web statis dengan fitur autoindex (Directory Listing) pada node vault sebagai berikut:
 
-a. Di node obladi dan desmond (Vault):
+Di node obladi dan desmond (Vault):
 Menginstal web server Apache2, membuat `direktori /arsip`, dan mengatur konfigurasi VirtualHost dengan ServerName `vault.k24.com`. Kami juga menambahkan direktif Options Indexes agar isi direktori dapat ditelusuri langsung dari browser ketika diakses melalui hostname.
 
 kami buat script `nomer9.sh` di node obladi dan desmond:
@@ -810,10 +810,95 @@ lalu kami melakukan validasi dari node klien untuk menguji akses directory listi
 
 ```sh
 curl http://vault.k24.com/
+curl http://vault.k24.com/arsip/
 ```
 
 hasilnya:
 
 ![alt text](assets/nomer9.png)
 
-10. 
+10. Kami mengonfigurasi layanan web dinamis (PHP-FPM) menggunakan Nginx pada node core sebagai berikut:
+
+Di node oblada dan molly (Core):
+Membersihkan sisa layanan Apache2 untuk menghindari konflik di port 80, kemudian menginstal Nginx dan PHP-FPM. Kami menyiapkan direktori web dan membuat aplikasi sederhana berupa halaman beranda `(index.php)` serta halaman profil `(profil.php)`. Selanjutnya, kami membuat konfigurasi Nginx dengan `server_name core.k24.com` dan menerapkan aturan URL Rewrite `(rewrite ^ /profil.php last;)` agar akses ke URL `/profil` dapat memuat halaman profil secara bersih tanpa menuliskan akhiran `.php`.
+
+kami buat script `nomer10.sh` di node oblada dan molly:
+
+```sh
+#!/bin/bash
+
+# 1. Bersihkan Apache agar tidak bentrok di port 80
+service apache2 stop 2>/dev/null
+killall -9 apache2 2>/dev/null
+apt-get remove --purge -y apache2* 2>/dev/null
+rm -rf /var/www/html/index.html
+
+# 2. Update repo dan pasang Nginx serta PHP-FPM
+apt-get update
+apt-get install -y nginx php-fpm
+
+# 3. Deteksi versi PHP yang terpasang di sistem
+PHP_VER=$(php -v | head -n 1 | cut -d " " -f 2 | cut -d "." -f 1,2)
+
+# Pastikan layanan PHP-FPM menyala agar socket-nya siap
+service php${PHP_VER}-fpm restart
+
+# 4. Siapkan folder web dan file aplikasi sederhana
+mkdir -p /var/www/core
+
+cat <<'EOF' > /var/www/core/index.php
+<?php
+echo "Hello Core";
+?>
+EOF
+
+cat <<'EOF' > /var/www/core/profil.php
+<?php
+echo "About Core";
+?>
+EOF
+
+# 5. Buat konfigurasi Nginx beserta aturan URL Rewrite untuk /profil
+cat <<EOF > /etc/nginx/sites-available/core.conf
+server {
+    listen 80;
+    server_name core.k24.com;
+    root /var/www/core;
+
+    index index.php index.html;
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+
+    # Aturan URL Rewrite agar /profil mengarah ke /profil.php
+    location = /profil {
+        rewrite ^ /profil.php last;
+    }
+
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
+    }
+}
+EOF
+
+# 6. Aktifkan vhost core dan matikan konfigurasi default
+ln -sf /etc/nginx/sites-available/core.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+# 7. Restart Nginx dan PHP-FPM
+service nginx restart
+service php${PHP_VER}-fpm restart
+```
+
+lalu kami melakukan validasi dari node klien untuk menguji akses beranda dan halaman profil menggunakan perintah `curl`:
+
+```sh
+curl http://core.k24.com/
+curl http://core.k24.com/profil
+```
+
+hasilnya:
+
+![alt text](assets/nomer10.jpeg)
